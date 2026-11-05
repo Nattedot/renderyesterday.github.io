@@ -1,0 +1,6 @@
+# Runtime-afhankelijkheden (Tkinter zit in de Python-standaardbibliotheek;
+# op Debian/Ubuntu: apt install python3-tk)
+dnspython>=2.6,<3
+requests>=2.32,<3
+keyring>=25,<26
+cryptography>=43
