@@ -110,7 +110,7 @@ repair_panel/
   domains.py       invoer normaliseren/valideren (IDNA)
   models.py        CheckResult, ScanReport, DNSRecord, score
   remediation.py   build_plan, apply_plan (dry-run/diff/snapshot), rollback
-  providers/       base, transip, cloudflare (uitbreidbaar)
+  providers/       base, transip, cloudflare, hetzner (uitbreidbaar)
   storage.py       klantregister, keyring, auditlog, redactie
   report.py        HTML-rapport in VV-huisstijl (incl. blok "Uw mailverkeer")
   gui.py           Tkinter-interface

@@ -456,13 +456,16 @@ class RepairPanel(tk.Tk):
         cfg = self._hosted_cfg_or_warn()
         if not cfg:
             return
-        prompt = (f"Token voor de VV-zone {cfg.zone} ({cfg.provider}).\n"
-                  + ("Cloudflare: alleen Zone Read + DNS Edit op deze zone." if cfg.provider == "cloudflare"
-                     else "TransIP: access token (kortlevend, IP-whitelist)."))
+        hints = {
+            "cloudflare": "Cloudflare: alleen Zone Read + DNS Edit op deze zone.",
+            "hetzner": "Hetzner: Cloud API-token (lezen/schrijven) uit een project met alleen deze zone.",
+            "transip": "TransIP: access token (kortlevend, IP-whitelist).",
+        }
+        prompt = f"Token voor de VV-zone {cfg.zone} ({cfg.provider}).\n" + hints.get(cfg.provider, "")
         tok = simpledialog.askstring(APP_NAME, prompt, show="•", parent=self)
         if not tok:
             return
-        cred = {"token": tok.strip()} if cfg.provider == "cloudflare" else {"access_token": tok.strip()}
+        cred = {"access_token": tok.strip()} if cfg.provider == "transip" else {"token": tok.strip()}
         self.store.save(cfg.provider, cfg.zone, cred)
         self.audit.write("token_stored", cfg.zone, provider=cfg.provider, purpose="hosted-zone")
         self.status_var.set("VV-zonetoken opgeslagen in de keyring.")
@@ -596,8 +599,10 @@ class RepairPanel(tk.Tk):
             messagebox.showwarning(APP_NAME, "Kies eerst een provider.")
             return
         cred: dict[str, str] | None = None
-        if provider == "cloudflare":
-            tok = simpledialog.askstring(APP_NAME, "Cloudflare API-token (scoped op deze zone):", show="•", parent=self)
+        if provider in ("cloudflare", "hetzner"):
+            label = ("Cloudflare API-token (scoped op deze zone):" if provider == "cloudflare" else
+                     "Hetzner Cloud API-token (lezen/schrijven, project met alleen deze zone):")
+            tok = simpledialog.askstring(APP_NAME, label, show="•", parent=self)
             cred = {"token": tok.strip()} if tok else None
         else:
             use_key = messagebox.askyesno(APP_NAME, "TransIP: inloggen met sleutelpaar (Ja) of met een "

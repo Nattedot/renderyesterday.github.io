@@ -37,7 +37,7 @@ class ConfigError(ValueError):
 @dataclass(frozen=True)
 class HostedConfig:
     zone: str                      # zone zoals de provider die kent, bv. 'veiligvandaag.nl'
-    provider: str                  # 'cloudflare' | 'transip'
+    provider: str                  # 'hetzner' | 'cloudflare' | 'transip'
     rua_address: str               # bv. 'dmarc@veiligvandaag.nl'; domein moet binnen de zone vallen
     label: str = "h"               # relatief voorvoegsel binnen de zone; '' als de zone zelf dedicated is
     ttl: int = 300
@@ -52,7 +52,7 @@ class HostedConfig:
         if label and not _LABEL_RE.match(label):
             raise ConfigError(f"ongeldig label: {self.label!r}")
         object.__setattr__(self, "label", label)
-        if self.provider.lower() not in ("cloudflare", "transip"):
+        if self.provider.lower() not in ("hetzner", "cloudflare", "transip"):
             raise ConfigError(f"onbekende provider voor de VV-zone: {self.provider}")
         object.__setattr__(self, "provider", self.provider.lower())
         addr = self.rua_address.strip().removeprefix("mailto:")

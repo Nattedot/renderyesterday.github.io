@@ -26,7 +26,7 @@ WorkingDirectory=/opt/vv-repair-panel
 Environment=VV_REPAIR_PANEL_HOME=/var/lib/vv-hosted
 LoadCredentialEncrypted=rua-imap-password
 ExecStart=/opt/vv-repair-panel/.venv/bin/python -m repair_panel.hosted rua imap \
-    --host imap.VUL-IN.nl --user dmarc@veiligvandaag.nl
+    --host imappro.zoho.eu --user dmarc@veiligvandaag.nl
 ExecStartPost=/opt/vv-repair-panel/.venv/bin/python -m repair_panel.hosted rua purge --days 400
 
 # Hardening

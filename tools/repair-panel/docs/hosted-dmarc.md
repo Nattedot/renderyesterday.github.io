@@ -80,21 +80,24 @@ Alle wijzigingen lopen via het bestaande `apply_plan` van het Repair Panel:
 
 ## Eenmalige inrichting
 
-1. **VV-zone.** Advies: `veiligvandaag.nl` bij Cloudflare met een API-token met alleen
-   *Zone → DNS → Edit* en *Zone → Zone → Read*, beperkt tot deze zone, met IP-filter op RY6.
-   Staat de zone bij TransIP, dan is er geen scoped token (zie tokenbeheer-ontwerp). Alternatief
-   dan: subzone `h.veiligvandaag.nl` via NS-records delegeren naar Cloudflare en de configuratie
-   `--zone h.veiligvandaag.nl --label "" --rua dmarc@h.veiligvandaag.nl` gebruiken (MX voor
-   `h.veiligvandaag.nl` naar de mailbox nodig).
-2. **Mailbox** `dmarc@veiligvandaag.nl` met IMAP. Geen doorsturen naar een persoonlijke inbox:
-   grote ontvangers sturen dagelijks honderden rapporten.
+1. **VV-zone: `veiligvandaag.nl` staat bij Hetzner.** De tool gebruikt de Hetzner Cloud API
+   (DNS in de Hetzner Console). Tokens uit de oude DNS Console (dns.hetzner.com) werken daar niet.
+   Een Cloud-token geldt per *project* en kent alleen *lezen* of *lezen en schrijven*. Zet de zone
+   daarom in een **apart project** (bv. "VV DNS") zonder servers, en maak daar een token met
+   lezen en schrijven. Zo kan dat token alleen deze zone wijzigen en niet RY6 of andere resources.
+   Staat de zone nog in de oude DNS Console, migreer hem dan eerst naar de Hetzner Console.
+   (Cloudflare en TransIP worden ook ondersteund.)
+2. **Mailbox** `dmarc@veiligvandaag.nl` als aparte Zoho-gebruiker (Mail Lite of hoger; het gratis
+   plan heeft geen IMAP). Zet IMAP aan en maak een app-specifiek wachtwoord. IMAP-host
+   `imappro.zoho.eu`, poort 993 (EU-datacenter). Geen alias op een persoonlijke mailbox: het
+   wachtwoord staat op een server, en grote ontvangers sturen dagelijks rapporten per klant.
 3. **Configuratie:**
    ```bash
-   python -m repair_panel.hosted config init --zone veiligvandaag.nl --provider cloudflare \
+   python -m repair_panel.hosted config init --zone veiligvandaag.nl --provider hetzner \
        --rua dmarc@veiligvandaag.nl
    ```
 4. **Token** voor de VV-zone: in de GUI via *Hosted DMARC → VV-zonetoken opslaan…* (keyring), of
-   op RY6 als systemd-credential `hosted-cloudflare` met inhoud `{"token": "…"}`.
+   op RY6 als systemd-credential `hosted-hetzner` met inhoud `{"token": "…"}`.
 5. **RY6:** `deploy/vv-rua-ingest.service` en `.timer` installeren (zie de commentaarregels
    daarin), credentials aanmaken met `systemd-creds encrypt`.
 6. Het bestaande wildcard-advies (`*._report._dmarc.veiligvandaag.nl`) uit de README is hiermee
@@ -151,3 +154,7 @@ op SPF en soms op DKIM, zonder dat er sprake is van misbruik.
   admin-commandcenter.
 - **TransIP-CNAME-notatie** (afsluitende punt bij een extern doel) is gebaseerd op de API-documentatie
   en nog niet live getest. Test `delegate` eerst op een eigen TransIP-domein.
+- **Hetzner-koppeling** is gebouwd op de officiële SDK (hcloud-python) en de Terraform-provider, en getest
+  tegen een nagebootste API, nog niet live. Verstuurd worden TXT als gequote strings van maximaal 255
+  tekens en een CNAME-doel met afsluitende punt. Draai eerst een `publish` als dry-run en controleer het
+  resultaat met `verify`.

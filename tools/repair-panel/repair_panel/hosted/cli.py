@@ -5,7 +5,7 @@ Uitvoeren = dezelfde opdracht opnieuw met ``--apply --confirm <vingerafdruk>``. 
 wordt dan opnieuw berekend; wijkt het af van wat je zag, dan gebeurt er niets.
 
 Voorbeelden:
-  python -m repair_panel.hosted config init --zone veiligvandaag.nl --provider cloudflare \\
+  python -m repair_panel.hosted config init --zone veiligvandaag.nl --provider hetzner \\
       --rua dmarc@veiligvandaag.nl
   python -m repair_panel.hosted enroll klant.nl
   python -m repair_panel.hosted publish klant.nl
@@ -216,7 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("config", help="VV-zone instellen of tonen")
     c.add_argument("action", choices=["init", "show"])
     c.add_argument("--zone")
-    c.add_argument("--provider", choices=["cloudflare", "transip"])
+    c.add_argument("--provider", choices=["hetzner", "cloudflare", "transip"])
     c.add_argument("--rua")
     c.add_argument("--label", default="h")
     c.add_argument("--ttl", type=int, default=300)
