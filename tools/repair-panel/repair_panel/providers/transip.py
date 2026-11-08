@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from repair_panel.models import DNSRecord
-from repair_panel.providers.base import Provider, ProviderError, unquote_txt
+from repair_panel.providers.base import Provider, ProviderError, fqdn_dot, unquote_txt
 
 API_BASE = "https://api.transip.nl/v6"
 
@@ -87,6 +87,9 @@ class TransIPProvider(Provider):
         content = e["content"]
         if e["type"].upper() == "TXT":
             content = unquote_txt(content)
+        elif e["type"].upper() == "CNAME" and "." in content.rstrip("."):
+            # TransIP geeft een extern doel terug als FQDN met afsluitende punt.
+            content = fqdn_dot(content)
         return DNSRecord(name=e["name"], type=e["type"].upper(), content=content, ttl=int(e.get("expire", 3600)))
 
     @staticmethod

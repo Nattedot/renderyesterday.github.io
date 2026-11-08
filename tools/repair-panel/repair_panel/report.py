@@ -6,6 +6,7 @@ import html
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from repair_panel import __version__
 from repair_panel.models import CHECK_TITLES, CheckResult, ScanReport, Status
@@ -91,8 +92,29 @@ def _technical(r: CheckResult) -> str:
     return "<br>".join(bits)
 
 
+def _mail_section(summary: Any, advice: list[str] | None) -> str:
+    """Blok 'Uw mailverkeer' uit de DMARC-rapporten (hosted DMARC / monitoringabonnement)."""
+    if summary is None:
+        return ""
+    if not summary.total:
+        body = "<div class='item'><p>Er zijn nog geen DMARC-rapporten binnen. De eerste komen meestal binnen 48 uur.</p></div>"
+        return "<h2>Uw mailverkeer</h2>" + body
+    pct = round(summary.pass_rate * 100, 1)
+    suspicious = len([s for s in summary.failing_sources if s.failed])
+    tiles = (f"<div class='score'><div class='n'>{summary.total}</div><div class='l'>berichten gemeld door "
+             f"{len(summary.reporters)} ontvanger(s)</div></div>"
+             f"<div class='score after'><div class='n'>{_e(pct)}%</div><div class='l'>aantoonbaar door u verstuurd</div></div>"
+             f"<div class='score'><div class='n'>{suspicious}</div><div class='l'>servers zonder geldige handtekening</div></div>")
+    items = "".join(f"<div class='item'><p>{_e(a)}</p></div>" for a in (advice or []))
+    return (f"<h2>Uw mailverkeer (afgelopen {round((summary.until - summary.since) / 86400)} dagen)</h2>"
+            "<p class='sub'>Grote mailontvangers zoals Google en Microsoft melden ons dagelijks welke mail zij uit "
+            "uw naam ontvingen. Zo zien we of iemand uw domein misbruikt.</p>"
+            f"<div class='scores'>{tiles}</div>{items}")
+
+
 def render_html(before: ScanReport, after: ScanReport | None = None, customer_name: str = "",
-                changes_summary: list[str] | None = None) -> str:
+                changes_summary: list[str] | None = None, mail_summary: Any = None,
+                mail_advice: list[str] | None = None) -> str:
     has_after = after is not None
     date_str = datetime.fromisoformat((after or before).scanned_at).astimezone().strftime("%d-%m-%Y %H:%M") \
         if (after or before).scanned_at else ""
@@ -148,6 +170,7 @@ Er is niets geprobeerd te kraken of te misbruiken.</p>
 <table><thead><tr><th>Onderdeel</th><th>{'Vóór' if has_after else 'Status'}</th>{'<th>Ná</th>' if has_after else ''}</tr></thead>
 <tbody>{''.join(rows)}</tbody></table>
 {changes_html}
+{_mail_section(mail_summary, mail_advice)}
 <h2>{'Nog te doen' if has_after else 'Wat moet er gebeuren'}</h2>
 {todo_html}
 <footer>VeiligVandaag Repair Panel v{_e(__version__)} · veiligvandaag.nl ·
@@ -156,11 +179,14 @@ Dit rapport is een momentopname; instellingen kunnen later wijzigen.</footer>
 
 
 def export_report(path: Path, before: ScanReport, after: ScanReport | None = None, customer_name: str = "",
-                  changes_summary: list[str] | None = None) -> Path:
+                  changes_summary: list[str] | None = None, mail_summary: Any = None,
+                  mail_advice: list[str] | None = None) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_html(before, after, customer_name, changes_summary), encoding="utf-8")
+    path.write_text(render_html(before, after, customer_name, changes_summary, mail_summary, mail_advice),
+                    encoding="utf-8")
     data = {"before": before.to_dict(), "after": after.to_dict() if after else None,
-            "customer": customer_name, "changes": changes_summary or []}
+            "customer": customer_name, "changes": changes_summary or [],
+            "mail": mail_summary.to_dict() if mail_summary is not None else None, "mail_advice": mail_advice or []}
     path.with_suffix(".json").write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     return path

@@ -1,0 +1,50 @@
+# DMARC-aggregaatrapporten ophalen en verwerken (hosted DMARC, VeiligVandaag).
+#
+# Installatie op RY6 (als root):
+#   useradd --system --home /var/lib/vv-hosted --shell /usr/sbin/nologin vv-hosted
+#   install -d -o vv-hosted -g vv-hosted -m 0700 /var/lib/vv-hosted
+#   python3 -m venv /opt/vv-repair-panel/.venv && /opt/vv-repair-panel/.venv/bin/pip install -r requirements.txt
+#   # Geheimen versleuteld op schijf (alleen deze machine kan ze ontsleutelen):
+#   install -d -m 0700 /etc/credstore.encrypted
+#   systemd-ask-password -n "IMAP-wachtwoord dmarc@" | systemd-creds encrypt --name=rua-imap-password - \
+#       /etc/credstore.encrypted/rua-imap-password
+#   cp vv-rua-ingest.service vv-rua-ingest.timer /etc/systemd/system/
+#   # Pas IMAP-host en gebruiker hieronder aan, daarna:
+#   systemctl daemon-reload && systemctl enable --now vv-rua-ingest.timer
+#   journalctl -u vv-rua-ingest   (bevat nooit wachtwoorden of tokens)
+
+[Unit]
+Description=VeiligVandaag hosted DMARC: rua-rapporten verwerken
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=vv-hosted
+Group=vv-hosted
+WorkingDirectory=/opt/vv-repair-panel
+Environment=VV_REPAIR_PANEL_HOME=/var/lib/vv-hosted
+LoadCredentialEncrypted=rua-imap-password
+ExecStart=/opt/vv-repair-panel/.venv/bin/python -m repair_panel.hosted rua imap \
+    --host imap.VUL-IN.nl --user dmarc@veiligvandaag.nl
+ExecStartPost=/opt/vv-repair-panel/.venv/bin/python -m repair_panel.hosted rua purge --days 400
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/vv-hosted
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+UMask=0077
+TimeoutStartSec=15min
