@@ -161,3 +161,32 @@ def test_make_provider():
         make_provider("cloudflare", None)
     with pytest.raises(ProviderError):
         make_provider("mijndomein", {"token": "t"})
+
+
+# ---------------------------------------------------------------- CNAME (hosted DMARC)
+def test_cloudflare_cname_dns_only_without_trailing_dot():
+    seen = {}
+
+    def create(kw):
+        seen.update(kw["json"])
+        return FakeResponse(200, json_data={"success": True, "result": {
+            "id": "r9", "type": "CNAME", "name": f"_dmarc.{D}", "content": "abc._dmarc.h.veiligvandaag.nl",
+            "ttl": 3600}})
+
+    s = FakeSession({
+        ("GET", f"{CF}/zones"): FakeResponse(200, json_data={"success": True, "result": [{"id": "z1"}]}),
+        ("POST", f"{CF}/zones/z1/dns_records"): create,
+    })
+    p = CloudflareProvider("tok", session=s)
+    rec = p.create_record(D, DNSRecord("_dmarc", "CNAME", "abc._dmarc.h.veiligvandaag.nl.", 3600))
+    assert seen["content"] == "abc._dmarc.h.veiligvandaag.nl" and seen["proxied"] is False
+    assert rec == DNSRecord("_dmarc", "CNAME", "abc._dmarc.h.veiligvandaag.nl.", 3600)   # genormaliseerd terug
+
+
+def test_transip_cname_normalized_to_fqdn():
+    s = FakeSession({("GET", f"{TI}/domains/{D}/dns"): FakeResponse(200, json_data={"dnsEntries": [
+        {"name": "_dmarc", "expire": 3600, "type": "CNAME", "content": "ABC._dmarc.h.veiligvandaag.nl."},
+        {"name": "www", "expire": 3600, "type": "CNAME", "content": "@"}]})})
+    recs = TransIPProvider({"access_token": "tok"}, session=s).list_records(D)
+    assert recs[0].content == "abc._dmarc.h.veiligvandaag.nl."
+    assert recs[1].content == "@"

@@ -47,6 +47,11 @@ def unquote_txt(content: str) -> str:
     return s
 
 
+def fqdn_dot(name: str) -> str:
+    """Absolute DNS-naam met precies één afsluitende punt, lowercase."""
+    return name.strip().rstrip(".").lower() + "."
+
+
 class Provider(abc.ABC):
     """Gemeenschappelijke interface. Alle namen zijn relatief ('@', '_dmarc')."""
 

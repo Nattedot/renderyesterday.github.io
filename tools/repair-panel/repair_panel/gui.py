@@ -21,12 +21,28 @@ from typing import Any, Callable
 
 from repair_panel import APP_NAME, __version__
 from repair_panel.checks import run_scan
+from repair_panel.dns_client import SystemResolver
 from repair_panel.domains import InvalidDomain, normalize_domain
+from repair_panel.hosted.config import ConfigError, HostedConfig, load_config
+from repair_panel.hosted.inbox import hosted_zone_credential
+from repair_panel.hosted.registry import HostedRegistry
+from repair_panel.hosted.rua import ReportStore, recommend, summarize
+from repair_panel.hosted.service import HostedPlan, HostedService
 from repair_panel.models import ScanReport
 from repair_panel.providers import PROVIDERS, make_provider
 from repair_panel.remediation import Plan, apply_plan, build_plan, list_snapshots, rollback
 from repair_panel.report import STATUS_COLORS, VV_ORANGE, export_report
 from repair_panel.storage import AuditLog, CredentialStore, Customer, CustomerRegistry, data_dir
+
+HOSTED_ACTIONS = (
+    "Publiceren in VV-zone",
+    "Klantzone laten verwijzen (klanttoken)",
+    "Beleid naar quarantine",
+    "Beleid naar reject",
+    "Opzeggen: bevriezen",
+    "Klantzone terugzetten (klanttoken)",
+    "Opruimen (retire)",
+)
 
 POLICY_CHOICES = {
     "Alleen ontbrekend aanmaken (p=none)": None,
@@ -50,6 +66,9 @@ class RepairPanel(tk.Tk):
         self.after_scan: ScanReport | None = None
         self.plan: Plan | None = None
         self.applied_summary: list[str] = []
+        self.hosted_plan: HostedPlan | None = None
+        self._hosted_state_before = ""
+        self._hosted_factory: Callable[[bool], Any] | None = None
         self._q: queue.Queue[Callable[[], None]] = queue.Queue()
         self._busy = False
 
@@ -86,6 +105,7 @@ class RepairPanel(tk.Tk):
         self._build_scan_tab()
         self._build_customer_tab()
         self._build_fix_tab()
+        self._build_hosted_tab()
         self._build_audit_tab()
 
         bottom = ttk.Frame(self, padding=(12, 4, 12, 10))
@@ -178,6 +198,39 @@ class RepairPanel(tk.Tk):
                                     command=self.on_apply, state="disabled")
         self.apply_btn.pack(side="left", padx=6)
 
+    def _build_hosted_tab(self) -> None:
+        f = ttk.Frame(self.nb, padding=8)
+        self.nb.add(f, text="Hosted DMARC")
+        self.hosted_status_var = tk.StringVar(value="Kies een domein en klik op Verifiëren of Aanmelden.")
+        ttk.Label(f, textvariable=self.hosted_status_var, wraplength=960).pack(fill="x")
+        row = ttk.Frame(f)
+        row.pack(fill="x", pady=(6, 0))
+        ttk.Button(row, text="Aanmelden (leest publieke DNS)", command=self.on_hosted_enroll).pack(side="left")
+        ttk.Button(row, text="Verifiëren", command=self.on_hosted_verify).pack(side="left", padx=6)
+        ttk.Button(row, text="Instructie voor klant", command=self.on_hosted_instructions).pack(side="left")
+        ttk.Button(row, text="Rapporten (30 dagen)", command=self.on_hosted_summary).pack(side="left", padx=6)
+        ttk.Button(row, text="VV-zonetoken opslaan…", command=self.on_hosted_token).pack(side="right")
+        row2 = ttk.Frame(f)
+        row2.pack(fill="x", pady=6)
+        ttk.Label(row2, text="Actie:").pack(side="left")
+        self.hosted_action_var = tk.StringVar(value=HOSTED_ACTIONS[0])
+        ttk.Combobox(row2, textvariable=self.hosted_action_var, values=HOSTED_ACTIONS, state="readonly",
+                     width=40).pack(side="left", padx=6)
+        ttk.Button(row2, text="1. Dry-run: plan en diff", command=self.on_hosted_plan).pack(side="left")
+        self.hosted_text = scrolledtext.ScrolledText(f, height=18, wrap="word", font=("Consolas", 10))
+        self.hosted_text.pack(fill="both", expand=True)
+        for tag, color in (("add", "#1B7F3B"), ("del", "#B42318"), ("warn", "#A35A00")):
+            self.hosted_text.tag_configure(tag, foreground=color)
+        confirm = ttk.Frame(f)
+        confirm.pack(fill="x", pady=(6, 0))
+        ttk.Label(confirm, text="2. Typ de vingerafdruk ter bevestiging:").pack(side="left")
+        self.hosted_confirm_var = tk.StringVar()
+        self.hosted_confirm_var.trace_add("write", lambda *_: self._update_hosted_apply_state())
+        ttk.Entry(confirm, textvariable=self.hosted_confirm_var, width=16).pack(side="left", padx=6)
+        self.hosted_apply_btn = ttk.Button(confirm, text="3. Uitvoeren", style="Accent.TButton",
+                                           command=self.on_hosted_apply, state="disabled")
+        self.hosted_apply_btn.pack(side="left", padx=6)
+
     def _build_audit_tab(self) -> None:
         f = ttk.Frame(self.nb, padding=8)
         self.nb.add(f, text="Auditlog")
@@ -203,7 +256,9 @@ class RepairPanel(tk.Tk):
                 self._q.put(lambda: done(result))
             except Exception as exc:  # noqa: BLE001
                 tb = traceback.format_exc(limit=3)
-                self._q.put(lambda: self._error(exc, tb))
+                # exc als default-argument binden: Python wist 'exc' aan het eind van het except-blok,
+                # waarna een gewone closure een NameError gaf en de event-queue stilviel.
+                self._q.put(lambda e=exc, t=tb: self._error(e, t))
             finally:
                 self._q.put(self._idle)
 
@@ -294,6 +349,205 @@ class RepairPanel(tk.Tk):
             self.confirm_var.get().strip() == self.plan.fingerprint
         self.apply_btn.configure(state="normal" if ok else "disabled")
 
+    # ------------------------------------------------------------ hosted
+    def _hosted_service(self) -> HostedService:
+        return HostedService(load_config(), HostedRegistry(), self.registry, self.audit)
+
+    def _hosted_cfg_or_warn(self) -> HostedConfig | None:
+        try:
+            return load_config()
+        except ConfigError as exc:
+            messagebox.showinfo(APP_NAME, str(exc))
+            return None
+
+    def _hosted_zone_provider(self, cfg: HostedConfig, read_only: bool):
+        return make_provider(cfg.provider, hosted_zone_credential(cfg.provider, cfg.zone, self.store),
+                             read_only=read_only)
+
+    def _hosted_show(self, text: str) -> None:
+        self.hosted_text.delete("1.0", "end")
+        for line in text.splitlines():
+            tag = "add" if line.startswith("+") else "del" if line.startswith("-") else \
+                "warn" if line.strip().startswith(("!", "[!!]")) else ""
+            self.hosted_text.insert("end", line + "\n", tag)
+        self.nb.select(3)
+
+    def _update_hosted_apply_state(self) -> None:
+        hp = self.hosted_plan
+        # Een plan zonder DNS-wijzigingen kan nog een statusovergang zijn (bv. klant verwijst al).
+        ok = hp is not None and self.hosted_confirm_var.get().strip() == hp.fingerprint and \
+            (not hp.plan.is_empty or hp.entry_after.state != self._hosted_state_before)
+        self.hosted_apply_btn.configure(state="normal" if ok else "disabled")
+
+    def _refresh_hosted_status(self, domain: str) -> None:
+        try:
+            cfg = load_config()
+        except ConfigError:
+            self.hosted_status_var.set("Hosted DMARC is nog niet ingesteld: python -m repair_panel.hosted config init …")
+            return
+        e = HostedRegistry().get(domain)
+        if e is None:
+            self.hosted_status_var.set(f"{domain} is niet aangemeld voor hosted DMARC.")
+            return
+        self.hosted_status_var.set(
+            f"{domain}: status {e.state} · beleid p={e.policy} · DMARC → {cfg.dmarc_target(e.hosted_id)}"
+            + (f" · SPF → {cfg.spf_target(e.hosted_id)}" if e.spf else " · SPF niet hosted"))
+
+    def on_hosted_enroll(self) -> None:
+        d = self._require_domain()
+        if not d or not self._hosted_cfg_or_warn():
+            return
+        svc = self._hosted_service()
+
+        def done(result) -> None:
+            entry, warnings = result
+            self._hosted_show("Aangemeld (er is nog niets gewijzigd in DNS).\n\n"
+                              + "\n".join(f"  ! {w}" for w in warnings)
+                              + "\n\nVolgende stap: actie 'Publiceren in VV-zone'.")
+            self._refresh_hosted_status(d)
+
+        self._run_bg("Aanmelden (alleen lezen)", lambda: svc.enroll(d, SystemResolver(), refresh=True), done)
+
+    def on_hosted_verify(self) -> None:
+        d = self._require_domain()
+        if not d or not self._hosted_cfg_or_warn():
+            return
+        svc = self._hosted_service()
+
+        def done(rep) -> None:
+            self._hosted_show(rep.text() + f"\n\nVV-records in orde: {'ja' if rep.hosted_ok else 'nee'} · "
+                              f"klant verwijst volledig: {'ja' if rep.delegated else 'nee'}")
+            self._refresh_hosted_status(d)
+
+        self._run_bg("Verifiëren via publieke DNS", lambda: svc.verify(d, SystemResolver()), done)
+
+    def on_hosted_instructions(self) -> None:
+        d = self._require_domain()
+        if not d or not self._hosted_cfg_or_warn():
+            return
+        try:
+            self._hosted_show(self._hosted_service().instructions(d))
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showwarning(APP_NAME, str(exc))
+
+    def on_hosted_summary(self) -> None:
+        d = self._require_domain()
+        if not d:
+            return
+
+        def work():
+            s = summarize(ReportStore(), d, days=30)
+            e = HostedRegistry().get(d)
+            return s, recommend(s, e.policy if e else "none")
+
+        def done(result) -> None:
+            s, advice = result
+            lines = [f"{d}: {s.total} berichten, {round(s.pass_rate * 100, 1)}% geslaagd, "
+                     f"{len(s.reporters)} ontvanger(s), {s.days_covered:.1f} dagen", ""]
+            lines += [f"- {a}" for a in advice]
+            if s.failing_sources:
+                lines += ["", "Bronnen zonder geldige handtekening:"]
+                lines += [f"  {x.source_ip:<40} {x.failed:>6} van {x.total}" for x in s.failing_sources[:15]]
+            self._hosted_show("\n".join(lines))
+
+        self._run_bg("Rapporten samenvatten", work, done)
+
+    def on_hosted_token(self) -> None:
+        cfg = self._hosted_cfg_or_warn()
+        if not cfg:
+            return
+        hints = {
+            "cloudflare": "Cloudflare: alleen Zone Read + DNS Edit op deze zone.",
+            "hetzner": "Hetzner: Cloud API-token (lezen/schrijven) uit een project met alleen deze zone.",
+            "transip": "TransIP: access token (kortlevend, IP-whitelist).",
+        }
+        prompt = f"Token voor de VV-zone {cfg.zone} ({cfg.provider}).\n" + hints.get(cfg.provider, "")
+        tok = simpledialog.askstring(APP_NAME, prompt, show="•", parent=self)
+        if not tok:
+            return
+        cred = {"access_token": tok.strip()} if cfg.provider == "transip" else {"token": tok.strip()}
+        self.store.save(cfg.provider, cfg.zone, cred)
+        self.audit.write("token_stored", cfg.zone, provider=cfg.provider, purpose="hosted-zone")
+        self.status_var.set("VV-zonetoken opgeslagen in de keyring.")
+
+    def _hosted_build(self, svc: HostedService, d: str, action: str, read_only: bool = True):
+        """Geeft (plan, provider-factory) voor de gekozen actie."""
+        cfg = svc.cfg
+        vv = lambda ro: self._hosted_zone_provider(cfg, ro)  # noqa: E731
+        client = lambda ro: self._provider(ro)  # noqa: E731
+        if action == HOSTED_ACTIONS[0]:
+            return svc.plan_publish(d, vv(read_only)), vv
+        if action == HOSTED_ACTIONS[1]:
+            return svc.plan_delegate(d, client(read_only), SystemResolver()), client
+        if action == HOSTED_ACTIONS[2]:
+            return svc.plan_set_policy(d, "quarantine", vv(read_only)), vv
+        if action == HOSTED_ACTIONS[3]:
+            return svc.plan_set_policy(d, "reject", vv(read_only)), vv
+        if action == HOSTED_ACTIONS[4]:
+            return svc.plan_freeze(d, vv(read_only)), vv
+        if action == HOSTED_ACTIONS[5]:
+            return svc.plan_undelegate(d, client(read_only)), client
+        if action == HOSTED_ACTIONS[6]:
+            return svc.plan_retire(d, vv(read_only), SystemResolver()), vv
+        raise ValueError(action)
+
+    def on_hosted_plan(self) -> None:
+        d = self._require_domain()
+        if not d or not self._hosted_cfg_or_warn():
+            return
+        try:
+            self.registry.require_authorized(d)
+        except PermissionError as exc:
+            messagebox.showwarning(APP_NAME, str(exc))
+            return
+        action = self.hosted_action_var.get()
+        svc = self._hosted_service()
+
+        def work():
+            before = svc.hosted.get(d)
+            hplan, factory = self._hosted_build(svc, d, action)
+            svc.apply(hplan, factory(True), dry_run=True)
+            return hplan, factory, before.state if before else ""
+
+        def done(result) -> None:
+            hplan, factory, state_before = result
+            self._hosted_state_before = state_before
+            self.hosted_plan = hplan
+            self._hosted_factory = factory
+            self.hosted_confirm_var.set("")
+            self._hosted_show(hplan.diff())
+            self._update_hosted_apply_state()
+            self.status_var.set(f"Dry-run klaar: {len(hplan.plan.changes)} wijziging(en), "
+                                f"vingerafdruk {hplan.fingerprint}.")
+
+        self._run_bg("Hosted plan maken (alleen lezen)", work, done)
+
+    def on_hosted_apply(self) -> None:
+        hp = self.hosted_plan
+        if not hp:
+            return
+        if not messagebox.askyesno(APP_NAME, f"{hp.action} uitvoeren voor {hp.entry_after.domain} "
+                                             f"({len(hp.plan.changes)} wijziging(en) in {hp.target})?\n\n"
+                                             "Er wordt eerst een snapshot gemaakt."):
+            return
+        confirmation = self.hosted_confirm_var.get()
+        svc = self._hosted_service()
+        factory = self._hosted_factory
+        if factory is None:
+            return
+
+        def work():
+            return svc.apply(hp, factory(False), confirmation=confirmation, dry_run=False)
+
+        def done(result) -> None:
+            self.hosted_plan = None
+            self._update_hosted_apply_state()
+            self.hosted_text.insert("end", f"\nUitgevoerd. Status nu: {hp.entry_after.state}. "
+                                           f"Snapshot: {result.snapshot_path or '-'}\n", "add")
+            self._refresh_hosted_status(hp.entry_after.domain)
+
+        self._run_bg("Hosted wijziging doorvoeren", work, done)
+
     # -------------------------------------------------------------- actions
     def on_scan(self) -> None:
         d = self._require_domain()
@@ -345,8 +599,10 @@ class RepairPanel(tk.Tk):
             messagebox.showwarning(APP_NAME, "Kies eerst een provider.")
             return
         cred: dict[str, str] | None = None
-        if provider == "cloudflare":
-            tok = simpledialog.askstring(APP_NAME, "Cloudflare API-token (scoped op deze zone):", show="•", parent=self)
+        if provider in ("cloudflare", "hetzner"):
+            label = ("Cloudflare API-token (scoped op deze zone):" if provider == "cloudflare" else
+                     "Hetzner Cloud API-token (lezen/schrijven, project met alleen deze zone):")
+            tok = simpledialog.askstring(APP_NAME, label, show="•", parent=self)
             cred = {"token": tok.strip()} if tok else None
         else:
             use_key = messagebox.askyesno(APP_NAME, "TransIP: inloggen met sleutelpaar (Ja) of met een "
@@ -475,7 +731,13 @@ class RepairPanel(tk.Tk):
         if not path:
             return
         c = self.registry.get(self.domain)
-        out = export_report(Path(path), self.before_scan, self.after_scan, c.customer_name if c else "", self.applied_summary)
+        mail_summary, mail_advice = None, None
+        hosted_entry = HostedRegistry().get(self.domain)
+        if hosted_entry and hosted_entry.state in ("published", "active"):
+            mail_summary = summarize(ReportStore(), self.domain, days=30)
+            mail_advice = recommend(mail_summary, hosted_entry.policy)
+        out = export_report(Path(path), self.before_scan, self.after_scan, c.customer_name if c else "",
+                            self.applied_summary, mail_summary, mail_advice)
         self.audit.write("report_exported", self.domain, file=out.name)
         webbrowser.open(out.as_uri())
 

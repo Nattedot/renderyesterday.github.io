@@ -44,7 +44,7 @@ class PlanMismatch(Exception):
 
 @dataclass
 class Change:
-    kind: str                          # create | update | delete | setting
+    kind: str                          # create | update | replace | delete | setting
     check_id: str
     reason: str
     before: DNSRecord | None = None
@@ -312,6 +312,12 @@ def _check_drift(plan: Plan, current: list[DNSRecord], provider: Provider) -> No
         if c.kind in ("update", "delete") and c.before not in current:
             raise PlanMismatch(f"Zone is gewijzigd sinds de dry-run ({c.before.name} {c.before.type}). "
                                "Maak een nieuw plan.")
+        if c.kind == "replace":
+            if c.before not in current:
+                raise PlanMismatch(f"Zone is gewijzigd sinds de dry-run ({c.before.name} {c.before.type}). "
+                                   "Maak een nieuw plan.")
+            if c.after in current:
+                raise PlanMismatch(f"Record {c.after.name} {c.after.type} bestaat al. Maak een nieuw plan.")
         if c.kind == "create" and c.after in current:
             raise PlanMismatch(f"Record {c.after.name} {c.after.type} bestaat al. Maak een nieuw plan.")
         if c.kind == "setting" and provider.get_setting(plan.domain, c.setting) != c.value_before:
@@ -325,6 +331,9 @@ def _execute(provider: Provider, domain: str, c: Change) -> dict[str, Any]:
     if c.kind == "update":
         updated = provider.update_record(domain, c.before, c.after)
         return {**c.to_dict(), "result": updated.to_dict()}
+    if c.kind == "replace":
+        replaced = replace_record(provider, domain, c.before, c.after)
+        return {**c.to_dict(), "result": replaced.to_dict()}
     if c.kind == "delete":
         provider.delete_record(domain, c.before)
         return {**c.to_dict(), "result": None}
@@ -332,6 +341,24 @@ def _execute(provider: Provider, domain: str, c: Change) -> dict[str, Any]:
         value = provider.set_setting(domain, c.setting, c.value_after)
         return {**c.to_dict(), "result": value}
     raise ValueError(f"onbekend wijzigingstype {c.kind}")
+
+
+def replace_record(provider: Provider, domain: str, old: DNSRecord, new: DNSRecord) -> DNSRecord:
+    """Eerst verwijderen, dan aanmaken. Nodig waar oud en nieuw niet naast elkaar mogen bestaan
+    (TXT -> CNAME op dezelfde naam, of CNAME -> CNAME). Mislukt het aanmaken, dan wordt het
+    oude record teruggezet zodat de zone niet zonder record achterblijft.
+    """
+    provider.delete_record(domain, old)
+    try:
+        return provider.create_record(domain, new)
+    except ProviderError as exc:
+        try:
+            provider.create_record(domain, old)
+        except ProviderError as restore_exc:
+            raise ProviderError(
+                f"{exc} | LET OP: terugzetten van het oude record mislukte ook ({restore_exc}); "
+                "controleer de zone en gebruik de rollback-snapshot.", exc.status_code) from exc
+        raise
 
 
 def _undo(provider: Provider, domain: str, applied: dict[str, Any]) -> None:
@@ -342,6 +369,8 @@ def _undo(provider: Provider, domain: str, applied: dict[str, Any]) -> None:
         provider.delete_record(domain, result)
     elif kind == "update":
         provider.update_record(domain, result, before)
+    elif kind == "replace":
+        replace_record(provider, domain, result, before)
     elif kind == "delete":
         provider.create_record(domain, before)
     elif kind == "setting":
@@ -349,14 +378,23 @@ def _undo(provider: Provider, domain: str, applied: dict[str, Any]) -> None:
 
 
 def apply_plan(plan: Plan, provider: Provider, registry: CustomerRegistry, audit: AuditLog, *,
-               confirmation: str = "", dry_run: bool = True, snapshots_base: Path | None = None) -> ApplyResult:
+               confirmation: str = "", dry_run: bool = True, snapshots_base: Path | None = None,
+               authorized_for: str | None = None) -> ApplyResult:
+    """Voer een plan uit (of log alleen de dry-run).
+
+    ``authorized_for``: het klantdomein waarvoor de offerte/toegang moet gelden, als dat
+    afwijkt van de zone die wordt gewijzigd. Gebruikt door hosted DMARC: de wijziging
+    vindt plaats in de VV-zone, maar mag alleen voor een geautoriseerde klant.
+    """
     domain = plan.domain
+    subject = (authorized_for or domain).lower()
     if dry_run:
         audit.write("dry_run", domain, provider=provider.name, fingerprint=plan.fingerprint,
-                    changes=[c.to_dict() for c in plan.changes], warnings=plan.warnings)
+                    changes=[c.to_dict() for c in plan.changes], warnings=plan.warnings,
+                    **({"customer_domain": subject} if subject != domain else {}))
         return ApplyResult(dry_run=True, diff=plan.diff())
 
-    customer = registry.require_authorized(domain)
+    customer = registry.require_authorized(subject)
     if confirmation.strip() != plan.fingerprint:
         audit.write("apply_refused", domain, reason="bevestiging komt niet overeen", fingerprint=plan.fingerprint)
         raise PlanMismatch("Bevestiging komt niet overeen met de vingerafdruk van het getoonde plan.")
@@ -369,7 +407,7 @@ def apply_plan(plan: Plan, provider: Provider, registry: CustomerRegistry, audit
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     snap_path = snapshot_dir(domain, snapshots_base) / f"{ts}-{plan.fingerprint}.json"
     snapshot: dict[str, Any] = {
-        "domain": domain, "provider": provider.name, "taken_at": ts,
+        "domain": domain, "authorized_for": subject, "provider": provider.name, "taken_at": ts,
         "customer": customer.customer_name, "offer_reference": customer.offer_reference,
         "plan": plan.to_dict(),
         "records_before": [r.to_dict() for r in current],
@@ -378,7 +416,8 @@ def apply_plan(plan: Plan, provider: Provider, registry: CustomerRegistry, audit
     }
     atomic_write_json(snap_path, snapshot)
     audit.write("apply_start", domain, provider=provider.name, fingerprint=plan.fingerprint,
-                snapshot=str(snap_path), offer_reference=customer.offer_reference)
+                snapshot=str(snap_path), offer_reference=customer.offer_reference,
+                **({"customer_domain": subject} if subject != domain else {}))
 
     for c in plan.changes:
         try:
@@ -405,7 +444,7 @@ def rollback(snapshot_path: Path, provider: Provider, registry: CustomerRegistry
     """Draai de toegepaste wijzigingen uit een snapshot terug, in omgekeerde volgorde."""
     snapshot = json.loads(Path(snapshot_path).read_text(encoding="utf-8"))
     domain = snapshot["domain"]
-    registry.require_authorized(domain)
+    registry.require_authorized(snapshot.get("authorized_for") or domain)
     audit.write("rollback_start", domain, snapshot=str(snapshot_path), reason=reason)
     problems: list[str] = []
     remaining = list(snapshot["applied"])

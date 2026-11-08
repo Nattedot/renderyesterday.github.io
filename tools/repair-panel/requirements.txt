@@ -4,3 +4,4 @@ dnspython>=2.6,<3
 requests>=2.32,<3
 keyring>=25,<26
 cryptography>=43
+defusedxml>=0.7.1,<1

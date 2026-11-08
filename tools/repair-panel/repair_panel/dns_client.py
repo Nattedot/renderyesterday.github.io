@@ -58,6 +58,13 @@ class SystemResolver:
         except dns.exception.Timeout as exc:
             raise DNSLookupError(f"timeout bij {name}") from exc
 
+    def cname(self, name: str) -> str | None:
+        """Doel van een CNAME op precies deze naam (zonder afsluitende punt), of None."""
+        answer = self._resolve(name, "CNAME")
+        for rdata in answer:
+            return rdata.target.to_text().rstrip(".").lower()
+        return None
+
     def mx(self, name: str) -> list[tuple[int, str]]:
         return sorted(
             (int(r.preference), r.exchange.to_text().rstrip(".").lower())

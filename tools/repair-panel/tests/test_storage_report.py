@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import time
 
 import pytest
 
@@ -91,6 +92,22 @@ def test_gui_starts_and_gates_apply_button(tmp_path):
         assert app._require_domain() == "klant.nl"
         assert "Geen klant" in app.auth_var.get()
         assert str(app.apply_btn["state"]) == "disabled"
+        # Hosted-tab: zonder plan nooit uitvoerbaar, ook niet met ingetypte tekst
+        assert "Hosted DMARC" in [app.nb.tab(i, "text") for i in app.nb.tabs()]
+        app.hosted_confirm_var.set("abc123")
+        assert str(app.hosted_apply_btn["state"]) == "disabled"
+        app._refresh_hosted_status("klant.nl")
+        assert "niet ingesteld" in app.hosted_status_var.get()
+        # Fout in een achtergrondtaak moet de GUI niet laten hangen (regressie: NameError op 'exc')
+        shown = []
+        app._error = lambda exc, tb: shown.append(str(exc))
+        app._run_bg("test", lambda: (_ for _ in ()).throw(RuntimeError("kapot")), lambda _r: None)
+        for _ in range(50):
+            app.update()
+            if shown and not app._busy:
+                break
+            time.sleep(0.02)
+        assert shown == ["kapot"] and not app._busy
         app.update()
     finally:
         app.destroy()
