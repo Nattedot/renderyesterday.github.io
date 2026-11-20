@@ -7,5 +7,5 @@ Defensieve configuratietool voor eigen klanten van VeiligVandaag.nl:
   geaccepteerde offerte en een eigen, scoped provider-token.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 APP_NAME = "VeiligVandaag Repair Panel"

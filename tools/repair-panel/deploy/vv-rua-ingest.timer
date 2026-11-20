@@ -1,0 +1,10 @@
+[Unit]
+Description=VeiligVandaag hosted DMARC: elk uur rua-rapporten verwerken
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

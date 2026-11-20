@@ -14,7 +14,7 @@ from typing import Any
 import requests
 
 from repair_panel.models import DNSRecord
-from repair_panel.providers.base import Provider, ProviderError, unquote_txt
+from repair_panel.providers.base import Provider, ProviderError, fqdn_dot, unquote_txt
 
 API_BASE = "https://api.cloudflare.com/client/v4"
 
@@ -71,13 +71,21 @@ class CloudflareProvider(Provider):
         content = e["content"]
         if e["type"] == "TXT":
             content = unquote_txt(content)
+        elif e["type"] == "CNAME":
+            content = fqdn_dot(content)
         ttl = int(e.get("ttl", 1))
         return DNSRecord(name=self._rel(e["name"], domain), type=e["type"], content=content,
                          ttl=ttl, provider_id=e["id"])
 
     def _body(self, rec: DNSRecord, domain: str) -> dict[str, Any]:
-        return {"type": rec.type, "name": self._fqdn(rec.name, domain), "content": rec.content,
-                "ttl": rec.ttl if rec.ttl >= 60 else 1}
+        body: dict[str, Any] = {"type": rec.type, "name": self._fqdn(rec.name, domain), "content": rec.content,
+                                "ttl": rec.ttl if rec.ttl >= 60 else 1}
+        if rec.type == "CNAME":
+            # Cloudflare verwacht geen afsluitende punt; DNS-only, want een geproxiede CNAME
+            # geeft bij TXT-lookups niet het doel terug.
+            body["content"] = rec.content.rstrip(".")
+            body["proxied"] = False
+        return body
 
     # --- DNS -------------------------------------------------------------
     def _raw_records(self, domain: str) -> list[dict[str, Any]]:

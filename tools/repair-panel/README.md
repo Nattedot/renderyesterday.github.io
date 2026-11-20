@@ -4,7 +4,8 @@ Desktoptool (Python/Tkinter) waarmee VeiligVandaag bij een MKB-klant ter plaatse
 
 1. **passief controleert** hoe het domein ervoor staat, op basis van uitsluitend publiek zichtbare gegevens;
 2. **herstelt** wat via de DNS-/zoneprovider te herstellen is, alleen voor klanten met een geaccepteerde offerte en een eigen, scoped API-token;
-3. een **rapport in VV-huisstijl** exporteert met een voor/na-overzicht dat een ondernemer zonder IT-kennis begrijpt.
+3. een **rapport in VV-huisstijl** exporteert met een voor/na-overzicht dat een ondernemer zonder IT-kennis begrijpt;
+4. **hosted DMARC/SPF via CNAME** beheert: de klant verwijst één keer naar de VV-zone, daarna wijzigen we beleid en afzenders zonder klanttoken en verwerken we de DMARC-rapporten. Zie [docs/hosted-dmarc.md](docs/hosted-dmarc.md).
 
 Het is een defensieve configuratietool voor eigen klanten. Het voert geen aanvallen uit en exploiteert niets.
 
@@ -72,7 +73,23 @@ Een andere map kies je met `VV_REPAIR_PANEL_HOME`.
 3. **Herstel:** kies het DMARC-beleid en klik op Dry-run. Beoordeel de diff en de waarschuwingen, typ de vingerafdruk over en klik op Uitvoeren.
 4. **Scan opnieuw** na de TTL (vaak 5 tot 60 minuten) en **exporteer het rapport**. Het HTML-bestand bevat vóór, ná, wat er is aangepast en wat nog moet gebeuren. Printen naar PDF kan rechtstreeks vanuit de browser.
 
-**DMARC-rapporten naar veiligvandaag.nl:** als `rua` naar een ander domein wijst, moet dat domein toestemming geven (RFC 7489 §7.1). Zet daarom op veiligvandaag.nl een TXT-record `<klantdomein>._report._dmarc.veiligvandaag.nl` met inhoud `v=DMARC1`, of eenmalig een wildcard `*._report._dmarc.veiligvandaag.nl`. De tool waarschuwt hiervoor in het plan.
+**DMARC-rapporten naar veiligvandaag.nl:** als `rua` naar een ander domein wijst, moet dat domein toestemming geven (RFC 7489 §7.1) met een TXT-record `<klantdomein>._report._dmarc.veiligvandaag.nl` = `v=DMARC1`. Met hosted DMARC zet de tool dat record per klant automatisch in de VV-zone. Gebruik bewust geen wildcard: dan komen er rapporten binnen over domeinen die geen klant zijn.
+
+## Hosted DMARC/SPF
+
+Tabblad **Hosted DMARC** in de GUI, of de command line `python -m repair_panel.hosted` (ook voor de server):
+
+```bash
+python -m repair_panel.hosted enroll klant.nl           # leest publieke DNS, wijzigt niets
+python -m repair_panel.hosted publish klant.nl          # dry-run; uitvoeren met --apply --confirm <vingerafdruk>
+python -m repair_panel.hosted delegate klant.nl         # klantzone laten verwijzen (klanttoken), of:
+python -m repair_panel.hosted instructions klant.nl     # instructie voor providers zonder API
+python -m repair_panel.hosted verify klant.nl
+python -m repair_panel.hosted set-policy klant.nl quarantine
+python -m repair_panel.hosted rua summary klant.nl
+```
+
+Ontwerp, veiligheidsmodel, inrichting van de VV-zone en de systemd-units voor RY6 (`deploy/`): [docs/hosted-dmarc.md](docs/hosted-dmarc.md).
 
 ## Tests
 
@@ -82,7 +99,7 @@ pytest                      # GUI-test wordt overgeslagen zonder Tkinter/display
 xvfb-run -a pytest          # Linux headless, inclusief GUI-smoketest
 ```
 
-De tests draaien volledig offline, met nep-resolvers, nep-HTTP-sessies, een in-memory provider en een nep-keyring. Ze dekken onder andere: geen herstel zonder autorisatie, geen uitvoering zonder juiste vingerafdruk, drift-detectie, automatische rollback bij een fout, SPF nooit afzwakken, DMARC nooit verlagen, geen HSTS bij een kapot certificaat, de integriteit van de auditketen, redactie van geheimen, ondertekening van TransIP-requests en de paginering van Cloudflare.
+De tests draaien volledig offline, met nep-resolvers, nep-HTTP-sessies, een in-memory provider en een nep-keyring. Ze dekken onder andere: geen herstel zonder autorisatie, geen uitvoering zonder juiste vingerafdruk, drift-detectie, automatische rollback bij een fout, SPF nooit afzwakken, DMARC nooit verlagen, geen HSTS bij een kapot certificaat, de integriteit van de auditketen, redactie van geheimen, ondertekening van TransIP-requests en de paginering van Cloudflare. Voor hosted DMARC: de volledige levenscyclus tegen in-memory zones met een resolver die CNAME's volgt, weigeren van verwijzen vóór publicatie en na wijzigingen bij de klant, `retire` alleen als de klant niet meer verwijst, herstel bij een mislukte TXT→CNAME-vervanging, XXE/entity-expansie, zip- en gzip-bommen, ontdubbeling en IMAP-afhandeling.
 
 ## Structuur
 
@@ -93,15 +110,25 @@ repair_panel/
   domains.py       invoer normaliseren/valideren (IDNA)
   models.py        CheckResult, ScanReport, DNSRecord, score
   remediation.py   build_plan, apply_plan (dry-run/diff/snapshot), rollback
-  providers/       base, transip, cloudflare (uitbreidbaar)
+  providers/       base, transip, cloudflare, hetzner (uitbreidbaar)
   storage.py       klantregister, keyring, auditlog, redactie
-  report.py        HTML-rapport in VV-huisstijl
+  report.py        HTML-rapport in VV-huisstijl (incl. blok "Uw mailverkeer")
   gui.py           Tkinter-interface
+  hosted/          hosted DMARC/SPF via CNAME
+    config.py      VV-zone, namen, rua-adres
+    registry.py    hosted domeinen en levenscyclus
+    records.py     gewenste records afleiden en valideren
+    service.py     plannen (VV-zone en klantzone), uitvoeren, verifiëren
+    rua.py         rapporten veilig uitpakken, parsen, opslaan, samenvatten
+    inbox.py       IMAP-inname, geheimen uit systemd-credentials/keyring
+    cli.py         python -m repair_panel.hosted
+deploy/            systemd-service en -timer voor rua-verwerking op RY6
+docs/              ontwerpdocumentatie
 ```
 
 ## Bekende beperkingen en vervolgstappen
 
 - DKIM, CSP, X-Frame-Options en Referrer-Policy worden niet automatisch gezet (zie de tabel). Voor M365-DKIM is een vervolgstap mogelijk via de Exchange Online-API, maar die vereist een tenant-login van de klant.
-- Providers na TransIP en Cloudflare (Mijndomein, Hostnet, Strato, Antagonist) zijn nog niet geïmplementeerd. Een nieuwe provider subclasst `Provider`.
+- Providers na TransIP en Cloudflare (Mijndomein, Hostnet, Strato, Antagonist) zijn nog niet geïmplementeerd. Een nieuwe provider subclasst `Provider`. Voor DMARC/SPF is dat met hosted DMARC minder urgent: de klant zet eenmalig twee records met de instructie uit `hosted instructions`.
 - `VV_ORANGE` in `report.py` is `#F26B1D`. Pas dit aan als het merkboek een andere waarde voorschrijft.
 - Het klantregister is lokaal (JSON). Koppeling met het admin-commandcenter (offertestatus centraal) ligt voor de hand als volgende stap.
