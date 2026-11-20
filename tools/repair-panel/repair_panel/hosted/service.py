@@ -389,6 +389,21 @@ class HostedService:
             self.audit.write("hosted_activated", domain, hosted_id=entry.hosted_id)
         return rep
 
+    def accepted_report_domains(self) -> set[str]:
+        """Domeinen waarvan we rua-rapporten opslaan.
+
+        - hosted domeinen (draft/published/active);
+        - het eigen domein (de VV-zone zelf, bv. veiligvandaag.nl);
+        - klanten uit het Repair Panel met een geldige autorisatie waarvan het
+          rapportageadres naar het VV-rua-adres wijst (DMARC direct in de klantzone,
+          zonder hosted). Rapporten over alle andere domeinen worden weggegooid.
+        """
+        out = set(self.hosted.active_domains()) | {self.cfg.zone}
+        for c in self.customers.all():
+            if self.cfg.rua_address in c.dmarc_rua.lower() and not c.authorization_problems():
+                out.add(c.domain.lower())
+        return out
+
     def instructions(self, domain: str) -> str:
         return customer_instructions(self.cfg, self._entry(domain))
 

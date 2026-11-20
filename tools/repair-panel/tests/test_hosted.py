@@ -387,3 +387,20 @@ def test_enroll_twice_requires_refresh(world):
         svc.enroll(D, resolver)
     e2, _ = svc.enroll(D, resolver, refresh=True)
     assert e1.hosted_id == e2.hosted_id
+
+
+def test_accepted_report_domains(world, cfg):
+    from repair_panel.storage import Customer
+    svc, client, vv, resolver = world
+    assert svc.accepted_report_domains() == {ZONE}            # eigen domein altijd; klant nog niet hosted
+    svc.enroll(D, resolver)
+    assert D in svc.accepted_report_domains()
+    svc.customers.save(Customer(domain="direct.nl", customer_name="Direct", provider="transip",
+                                offer_reference="OF-2", offer_accepted_on="2026-01-02",
+                                access_granted_on="2026-01-03", dmarc_rua="dmarc@veiligvandaag.nl"))
+    svc.customers.save(Customer(domain="ingetrokken.nl", customer_name="X", provider="transip",
+                                offer_reference="OF-3", offer_accepted_on="2026-01-02",
+                                access_granted_on="2026-01-03", revoked_on="2026-02-01",
+                                dmarc_rua="dmarc@veiligvandaag.nl"))
+    acc = svc.accepted_report_domains()
+    assert "direct.nl" in acc and "ingetrokken.nl" not in acc

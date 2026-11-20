@@ -168,8 +168,8 @@ def cmd_rollback(args: argparse.Namespace) -> int:
 def cmd_rua(args: argparse.Namespace) -> int:
     store = ReportStore()
     hosted = HostedRegistry()
-    accepted = hosted.active_domains()
     audit = AuditLog()
+    accepted = _service().accepted_report_domains() if args.action in ("imap", "ingest") else set()
     if args.action == "imap":
         password = read_secret(args.secret)
         settings = ImapSettings(host=args.host, user=args.user, mailbox=args.mailbox, port=args.port)

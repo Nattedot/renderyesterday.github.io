@@ -100,8 +100,12 @@ Alle wijzigingen lopen via het bestaande `apply_plan` van het Repair Panel:
    op RY6 als systemd-credential `hosted-hetzner` met inhoud `{"token": "…"}`.
 5. **RY6:** `deploy/vv-rua-ingest.service` en `.timer` installeren (zie de commentaarregels
    daarin), credentials aanmaken met `systemd-creds encrypt`.
-6. Het bestaande wildcard-advies (`*._report._dmarc.veiligvandaag.nl`) uit de README is hiermee
-   vervallen: autorisatie gaat per klant, automatisch.
+6. **Wildcard `*._report._dmarc.veiligvandaag.nl`** staat live (overgenomen van Hostnet). Laat die
+   voorlopig staan: klanten die via het Repair Panel DMARC direct in hun eigen zone kregen, met rua
+   naar VV, zijn ervan afhankelijk. De tool raakt de wildcard nooit aan. Verwijder hem pas als al die
+   klanten hosted zijn (dan hebben ze een eigen autorisatierecord). Tot die tijd vangt de verwerker
+   misbruik af: rapporten worden alleen opgeslagen voor hosted domeinen, voor het eigen domein en voor
+   geautoriseerde klanten met rua naar VV.
 
 ## Werkwijze per klant
 
